@@ -1,159 +1,159 @@
-#include <mpi.h> 
-#include <stdio.h> 
-#include <stdlib.h> 
-#include <unistd.h> 
-#include <omp.h>
+//kezhengchangyunxing CUDAbanben 
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
 #include <math.h>
+#include <stdio.h>
+#include <mpi.h>
+#include <omp.h>
+#include <stdlib.h>
+#include <unistd.h>
 
-// size of array 
-#define n 1000 
+#define TOTALN 344062
+#define BLOCKS_PerGrid 32
+#define THREADS_PerBlock 64 
 
-__global__ void vecAdd(float *a,float sum,int m)
-{
-    // Get our global thread ID
-    int id = blockIdx.x*blockDim.x+threadIdx.x;
+
+__global__ void SumArray(float *c, float *a,int m) {
+    __shared__ float mycache[THREADS_PerBlock];
+    int i = threadIdx.x+blockIdx.x*blockDim.x;
+    int j = gridDim.x*blockDim.x;
+    int cacheN;
+    float sum;
+    int k;
+
+    sum=0;
+
+    cacheN=threadIdx.x; 
+
+    while(i<m) {
+        sum += a[i];
+        i = i+j;
+    }
+
+    mycache[cacheN]=sum;
  
-    // Make sure we do not go out of bounds
-    if (id < n)
-        sum += a[id];
-    //printf("cuda");
+    __syncthreads();
+
+    k=THREADS_PerBlock>>1;
+    while(k) {
+        if(cacheN<k) {
+            mycache[cacheN] += mycache[cacheN+k];
+        }
+        __syncthreads();
+        k=k>>1;
+    }
+
+
+    if(cacheN==0) {
+        c[blockIdx.x]=mycache[0];
+    }
 }
 
-float a[1000];
-int i;
-
-//float a[10000] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; 
-
-// Temporary array for slave process 
-float a2[1000]; 
-
-
-
-int main(int argc, char* argv[]) 
-{ 
-for(i = 0; i < n; i++) {
-    a[i] = (float) drand48();
- }
-	int pid, np, 
-		elements_per_process, 
-		n_elements_recieved; 
-	// np -> no. of processes 
-	// pid -> process id 
-
-	MPI_Status status; 
-
-	// Creation of parallel processes 
-	MPI_Init(&argc, &argv); 
-
-	// find out process ID, 
-	// and how many processes were started 
-	MPI_Comm_rank(MPI_COMM_WORLD, &pid); 
-	MPI_Comm_size(MPI_COMM_WORLD, &np); 
-
-	// master process 
-	if (pid == 0) { 
-		int index, i; 
-		elements_per_process = n / np; 
-
-		// check if more than 1 processes are run 
-		if (np > 1) { 
-			// distributes the portion of array 
-			// to child processes to calculate 
-			// their partial sums 
-			for (i = 1; i < np - 1; i++) { 
-				index = i * elements_per_process; 
-
-				MPI_Send(&elements_per_process, 
-						1, MPI_INT, i, 0, 
-						MPI_COMM_WORLD); 
-				MPI_Send(&a[index], 
-						elements_per_process, 
-						MPI_INT, i, 0, 
-						MPI_COMM_WORLD); 
-			} 
-
-			// last process adds remaining elements 
-			index = i * elements_per_process; 
-			int elements_left = n - index; 
-
-			MPI_Send(&elements_left, 
-					1, MPI_INT, 
-					i, 0, 
-					MPI_COMM_WORLD); 
-			MPI_Send(&a[index], 
-					elements_left, 
-					MPI_INT, i, 0, 
-					MPI_COMM_WORLD); 
-		} 
-
-		// master process add its own sub array 
-		float h_sum = 0;
-                float *d_sum;
-                float sum = 0;
-
  
-                #pragma omp parallel for
-		for (i = 0; i < 4; i++) 
-		    {
-                        float *d_a;
-                        cudaMalloc(&d_a, (elements_per_process/4)*sizeof(float));
-                        cudaMalloc(&d_sum, sizeof(float));
-                        //an error could be here
-                        cudaMemcpy( d_a, &a[i*(elements_per_process/4)], (elements_per_process/4)*sizeof(float), cudaMemcpyHostToDevice);
-                        cudaMemcpy( d_sum, &h_sum, sizeof(float), cudaMemcpyHostToDevice);
-                        int blockSize, gridSize;
-                        blockSize = 1024;
-                        gridSize = (int)ceil((float)(elements_per_process/4)/blockSize);
-                        vecAdd<<<gridSize, blockSize>>>(d_a, *d_sum, (elements_per_process/4));
-                        cudaMemcpy( &h_sum, d_sum, sizeof(float), cudaMemcpyDeviceToHost );
-                        sum += h_sum; printf("Sum of array is : %f\n", sum); 
-                        cudaFree(d_a);
-                        cudaFree(d_sum);
-                       printf("asd");
-                    }
+
+int main(int argc, char* argv[]) {
+
+    int pid, np, elements_per_process, element_per_GPU;
+    float local_sum = 0; 
+    MPI_Init(&argc, &argv);
+ 
+    MPI_Comm_rank(MPI_COMM_WORLD, &pid);
+    MPI_Comm_size(MPI_COMM_WORLD, &np);
+
+    elements_per_process = TOTALN / np;
+
+    //printf("elements_per_process:%d\n",elements_per_process);
+    //printf("np:%d\n",np);
+
+    float a[TOTALN] ;
+    float c[np*2*BLOCKS_PerGrid] ;
+    
+    int j;
+    for(j=0;j<TOTALN;j++) {
+        a[j]=(float) drand48();
+    }
+    //CPU version
+    float sum_serial;
+    sum_serial=0;
+    for(j=0;j<TOTALN;j++){
+        //printf("%d",TOTALN);
+        sum_serial += a[j];
+    }
+
+    int N = 16; // 16 CPUs and 2GPUs
+
+    int tid;
+    int M =2;
+    element_per_GPU = elements_per_process/(M+1);
+
+    printf("element_per_GPU:%d\n",element_per_GPU);
+
+    #pragma omp parallel num_threads(N) shared(local_sum)
+    {         
+
+            tid = omp_get_thread_num();
+            if (tid < M) { /* For GPU */
+                int GPU_index = (pid*elements_per_process)+tid * element_per_GPU;
+                float *dev_a = 0;
+                float *dev_c = 0;
+
+                cudaMalloc((void**)&dev_c, BLOCKS_PerGrid * sizeof(float));
+                cudaMalloc((void**)&dev_a, element_per_GPU * sizeof(float));
+                cudaMemcpy(dev_a, &a[GPU_index], element_per_GPU * sizeof(float), cudaMemcpyHostToDevice);
+                SumArray<<<BLOCKS_PerGrid, THREADS_PerBlock>>>(dev_c, dev_a,element_per_GPU);
+
+                cudaDeviceSynchronize();
+ 
+                cudaMemcpy(&c[(pid*np+tid) * BLOCKS_PerGrid], dev_c, BLOCKS_PerGrid * sizeof(float), cudaMemcpyDeviceToHost);
+                cudaFree(dev_c);
+                cudaFree(dev_a);
+
+                for(int j1=(pid*np+tid) * BLOCKS_PerGrid;j1<((pid*np+tid+1) * BLOCKS_PerGrid);j1++){
+                    local_sum +=c[j1];
+                }
+
+            }
+
+            else if(tid>=M&&tid !=N-1){
+
+                float partial_sum_cpu = 0.0;
+                         
+                int Nt = (elements_per_process-M*element_per_GPU)/(N-M);
+
+                int i_start = (pid*elements_per_process)+M*element_per_GPU+(tid-M)*Nt;
+                int i_end = (pid*elements_per_process)+M*element_per_GPU+((tid-M)+1)*Nt;
+  
+                for (int thread_index = i_start; thread_index<i_end; thread_index++){
+                    partial_sum_cpu+=a[thread_index];
+
+                }
+        
+                local_sum += partial_sum_cpu;
+            }
+            else if (tid==N-1){
+
+                float partial_sum_cpu = 0.0;
+
+                int Nt = (elements_per_process-M*element_per_GPU)-(N-M-1)*((elements_per_process-M*element_per_GPU)/(N-M));
                 
-                      
-		// collects partial sums from other processes 
-		int tmp; 
-		for (i = 1; i < np; i++) { 
-			MPI_Recv(&tmp, 1, MPI_INT, 
-					MPI_ANY_SOURCE, 0, 
-					MPI_COMM_WORLD, 
-					&status); 
-			int sender = status.MPI_SOURCE; 
+                int i_start = (pid+1)*elements_per_process-Nt;
+                int i_end = (pid+1)*elements_per_process;
 
-			sum += tmp; 
-		} 
+                for (int thread_index = i_start; thread_index<i_end; thread_index++){
+                    partial_sum_cpu+=a[thread_index];
+                }
+                local_sum += partial_sum_cpu;
+            }
+           
+      }
 
-		// prints the final sum of array 
-		printf("Sum of array isasdfhjk : %f\n", sum); 
-	} 
-	// slave processes 
-	else { 
-		MPI_Recv(&n_elements_recieved, 
-				1, MPI_INT, 0, 0, 
-				MPI_COMM_WORLD, 
-				&status); 
+    MPI_Barrier(MPI_COMM_WORLD);
+    float global_sum =0;
 
-		// stores the received array segment 
-		// in local array a2 
-		MPI_Recv(&a2, n_elements_recieved, 
-				MPI_INT, 0, 0, 
-				MPI_COMM_WORLD, 
-				&status); 
+    MPI_Allreduce ( &local_sum, &global_sum, 1,MPI_FLOAT, MPI_SUM,  MPI_COMM_WORLD );
+    MPI_Finalize();
 
-		// calculates its partial sum 
-		int partial_sum = 0; 
-		for (int i = 0; i < n_elements_recieved; i++) 
-			partial_sum += a2[i]; 
+    printf("local_sum=%f; global_sum=%f; sum_serial=%f\n",local_sum,global_sum,sum_serial);
 
-		// sends the partial sum to the root process 
-		MPI_Send(&partial_sum, 1, MPI_INT, 
-				0, 0, MPI_COMM_WORLD); 
-	} 
-
-	// cleans up all MPI state before exit of process 
-	MPI_Finalize(); 
-
-	return 0; 
-} 
+    return 0;
+}
