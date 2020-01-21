@@ -1,3 +1,4 @@
+/* Compute array sum using MPI, OpenMP and CUDA*/
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <math.h>
@@ -7,7 +8,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define TOTALN 344062
+#define TOTALN 120120
 #define BLOCKS_PerGrid 32
 #define THREADS_PerBlock 64 
 
@@ -61,90 +62,87 @@ int main(int argc, char* argv[]) {
 
     elements_per_process = TOTALN / np;
 
-    //printf("elements_per_process:%d\n",elements_per_process);
-    //printf("np:%d\n",np);
-
     float a[TOTALN] ;
-    float c[np*2*BLOCKS_PerGrid] ;
-    
+  
     int j;
+    srand48(1<<12);
     for(j=0;j<TOTALN;j++) {
         a[j]=(float) drand48();
     }
+
     //CPU version
     float sum_serial;
     sum_serial=0;
     for(j=0;j<TOTALN;j++){
-        //printf("%d",TOTALN);
         sum_serial += a[j];
     }
 
     int N = 16; // 16 CPUs and 2GPUs
+    float sum_per_thread[N]; 
+    for(int i = 0; i < N; i++){sum_per_thread[i] =0;}
 
-    int tid;
     int M =2;
+    float c[M*BLOCKS_PerGrid] ;
     element_per_GPU = elements_per_process/(M+1);
 
-    printf("element_per_GPU:%d\n",element_per_GPU);
-
-    #pragma omp parallel num_threads(N) shared(local_sum)
+    #pragma omp parallel num_threads(N)
     {         
 
-            tid = omp_get_thread_num();
+            int tid = omp_get_thread_num();
+
             if (tid < M) { /* For GPU */
                 int GPU_index = (pid*elements_per_process)+tid * element_per_GPU;
+
                 float *dev_a = 0;
                 float *dev_c = 0;
-
+               
                 cudaMalloc((void**)&dev_c, BLOCKS_PerGrid * sizeof(float));
                 cudaMalloc((void**)&dev_a, element_per_GPU * sizeof(float));
                 cudaMemcpy(dev_a, &a[GPU_index], element_per_GPU * sizeof(float), cudaMemcpyHostToDevice);
-                SumArray<<<BLOCKS_PerGrid, THREADS_PerBlock>>>(dev_c, dev_a,element_per_GPU);
+                SumArray<<<BLOCKS_PerGrid, THREADS_PerBlock>>>(dev_c, dev_a, element_per_GPU);
 
                 cudaDeviceSynchronize();
  
-                cudaMemcpy(&c[(pid*np+tid) * BLOCKS_PerGrid], dev_c, BLOCKS_PerGrid * sizeof(float), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&c[tid*BLOCKS_PerGrid], dev_c, BLOCKS_PerGrid * sizeof(float), cudaMemcpyDeviceToHost);
+                
                 cudaFree(dev_c);
                 cudaFree(dev_a);
 
-                for(int j1=(pid*np+tid) * BLOCKS_PerGrid;j1<((pid*np+tid+1) * BLOCKS_PerGrid);j1++){
-                    local_sum +=c[j1];
+                for(int j1=tid*BLOCKS_PerGrid;j1<(tid+1)*BLOCKS_PerGrid;j1++){
+                    sum_per_thread[tid] += c[j1];
+                    
                 }
-
             }
 
             else if(tid>=M&&tid !=N-1){
-
-                float partial_sum_cpu = 0.0;
-                         
+  
                 int Nt = (elements_per_process-M*element_per_GPU)/(N-M);
 
                 int i_start = (pid*elements_per_process)+M*element_per_GPU+(tid-M)*Nt;
+
                 int i_end = (pid*elements_per_process)+M*element_per_GPU+((tid-M)+1)*Nt;
-  
-                for (int thread_index = i_start; thread_index<i_end; thread_index++){
-                    partial_sum_cpu+=a[thread_index];
+   
+                for (int i = i_start; i<i_end; i++){
+                    sum_per_thread[tid]+=a[i];
 
                 }
-        
-                local_sum += partial_sum_cpu;
             }
             else if (tid==N-1){
-
-                float partial_sum_cpu = 0.0;
 
                 int Nt = (elements_per_process-M*element_per_GPU)-(N-M-1)*((elements_per_process-M*element_per_GPU)/(N-M));
                 
                 int i_start = (pid+1)*elements_per_process-Nt;
                 int i_end = (pid+1)*elements_per_process;
 
-                for (int thread_index = i_start; thread_index<i_end; thread_index++){
-                    partial_sum_cpu+=a[thread_index];
+                for (int i = i_start; i<i_end; i++){
+                    sum_per_thread[tid]+=a[i];
                 }
-                local_sum += partial_sum_cpu;
             }
            
       }
+
+    #pragma omp barrier
+    for(int i = 0; i < N; i++){local_sum +=sum_per_thread[i];}
 
     MPI_Barrier(MPI_COMM_WORLD);
     float global_sum =0;
